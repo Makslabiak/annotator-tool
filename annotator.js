@@ -8,16 +8,19 @@
  * никакой настройки под конкретный проект.
  *
  * ДЛЯ КЛОДА, ПОДКЛЮЧАЮЩЕГО ЭТОТ ИНСТРУМЕНТ К ПРОЕКТУ:
- *   Если сайт открывается локально как file:///... (не через сервер),
- *   fetch() внутри этого скрипта (используется для определения номера
- *   строки текстового элемента в исходном HTML) не будет работать —
- *   браузеры блокируют fetch() на file://. В этом случае предложи
- *   пользователю запустить рядом лежащий serve.sh (./serve.sh или
- *   bash serve.sh) — он поднимает локальный сервер (npx serve, либо
- *   python3 -m http.server как запасной вариант) и дальше сайт нужно
- *   открывать через http://localhost:..., а не двойным кликом по файлу.
- *   Сам инструмент это тоже определяет и покажет предупреждение в
- *   панели, если находится на file://.
+ *   На http(s) номера строк работают сразу, без доп. действий (скрипт
+ *   сам фетчит исходник страницы).
+ *   На file:///... (сайт открыт двойным кликом по index.html) браузеры
+ *   блокируют fetch() — в этом случае в панели снизу справа появляется
+ *   кнопка «📄 Подключить файл»: пользователь один раз выбирает исходный
+ *   HTML-файл через системный диалог (File System Access API), и дальше
+ *   выбор запоминается в IndexedDB — при следующих перезагрузках страницы
+ *   файл подключается автоматически, без сервера и без повторного диалога
+ *   (в Chrome/Edge). В Firefox/Safari (нет File System Access API) —
+ *   фолбэк на обычный input[type=file], придётся выбирать заново при
+ *   каждой перезагрузке, но сервер всё равно не нужен.
+ *   Рядом лежащий serve.sh — не обязателен, оставлен как альтернативный
+ *   способ на случай, если оба варианта выше не подходят.
  *
  * КАК ПОЛЬЗОВАТЬСЯ:
  *   Cmd+B (Mac) или Ctrl+B (Win/Linux) — включить/выключить режим
@@ -125,12 +128,120 @@
 
   // ---------- номер строки в исходном HTML ----------
   var pageSource = null;
+  var fileStatus = 'idle'; // idle | connected | needs-click | unsupported
 
+  // На http(s) можно просто зафетчить исходник страницы. На file://
+  // fetch() браузеры блокируют — там используется connectFile()/
+  // tryAutoReconnect() через File System Access API (см. ниже).
   function loadPageSource() {
+    if (location.protocol === 'file:') { tryAutoReconnect(); return; }
     fetch(location.href, { cache: 'no-store' })
       .then(function (r) { return r.text(); })
       .then(function (html) { pageSource = html; })
       .catch(function () {});
+  }
+
+  // ---------- file:// без сервера: File System Access API + IndexedDB ----------
+  // Идея: один раз пользователь руками выбирает исходный HTML-файл через
+  // системный диалог (showOpenFilePicker). Дальше хэндл на файл кладём в
+  // IndexedDB и при следующих открытиях страницы молча проверяем права
+  // (queryPermission) — если браузер их ещё помнит, читаем файл заново
+  // без всякого диалога. Так сервер вообще не нужен.
+  var IDB_NAME = 'annotator-fs', IDB_STORE = 'handles';
+
+  function idbOpen() {
+    return new Promise(function (resolve, reject) {
+      var req = indexedDB.open(IDB_NAME, 1);
+      req.onupgradeneeded = function () { req.result.createObjectStore(IDB_STORE); };
+      req.onsuccess = function () { resolve(req.result); };
+      req.onerror = function () { reject(req.error); };
+    });
+  }
+  function idbGet(key) {
+    return idbOpen().then(function (db) {
+      return new Promise(function (resolve) {
+        var tx = db.transaction(IDB_STORE, 'readonly');
+        var r = tx.objectStore(IDB_STORE).get(key);
+        r.onsuccess = function () { resolve(r.result || null); };
+        r.onerror = function () { resolve(null); };
+      });
+    }).catch(function () { return null; });
+  }
+  function idbSet(key, val) {
+    return idbOpen().then(function (db) {
+      return new Promise(function (resolve) {
+        var tx = db.transaction(IDB_STORE, 'readwrite');
+        tx.objectStore(IDB_STORE).put(val, key);
+        tx.oncomplete = function () { resolve(); };
+        tx.onerror = function () { resolve(); };
+      });
+    }).catch(function () {});
+  }
+
+  function readHandle(handle) {
+    return handle.getFile().then(function (file) { return file.text(); })
+      .then(function (text) {
+        pageSource = text;
+        fileStatus = 'connected';
+        updateFileStatusUI();
+      });
+  }
+
+  function tryAutoReconnect() {
+    if (!window.showOpenFilePicker) {
+      // Firefox/Safari — нет File System Access API. Фолбэк на обычный
+      // <input type="file">, без запоминания между перезагрузками.
+      fileStatus = 'unsupported';
+      updateFileStatusUI();
+      return;
+    }
+    idbGet(location.pathname).then(function (handle) {
+      if (!handle) { fileStatus = 'needs-click'; updateFileStatusUI(); return; }
+      handle.queryPermission({ mode: 'read' }).then(function (perm) {
+        if (perm === 'granted') {
+          readHandle(handle);
+        } else {
+          fileStatus = 'needs-click';
+          updateFileStatusUI();
+        }
+      }).catch(function () { fileStatus = 'needs-click'; updateFileStatusUI(); });
+    });
+  }
+
+  function connectFile() {
+    if (window.showOpenFilePicker) {
+      window.showOpenFilePicker({
+        types: [{ description: 'HTML', accept: { 'text/html': ['.html', '.htm'] } }]
+      }).then(function (handles) {
+        var handle = handles[0];
+        idbSet(location.pathname, handle);
+        return readHandle(handle);
+      }).catch(function () {});
+      return;
+    }
+    // фолбэк: обычный input[type=file], сработает и в Firefox/Safari
+    var input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.html,.htm';
+    input.style.cssText = 'position:fixed;top:-999px;';
+    input.addEventListener('change', function () {
+      var file = input.files && input.files[0];
+      if (!file) return;
+      file.text().then(function (text) {
+        pageSource = text;
+        fileStatus = 'connected';
+        updateFileStatusUI();
+      });
+      input.remove();
+    });
+    document.body.appendChild(input);
+    input.click();
+  }
+
+  function updateFileStatusUI() {
+    if (!panel) return;
+    buildPanel();
+    refreshCounter();
   }
 
   function lineNumber(elm) {
@@ -398,12 +509,21 @@
 
   // ---------- панель управления (снизу справа, только в активном режиме) ----------
   function buildPanel() {
-    var fileWarning = location.protocol === 'file:'
-      ? '<div class="panel__warn">Сайт открыт как file:// — номера строк работать не будут. Запусти рядом serve.sh и открой через http://localhost.</div>'
-      : '';
+    var fileBlock = '';
+    if (location.protocol === 'file:') {
+      if (fileStatus === 'connected') {
+        fileBlock = '<div class="panel__ok">✓ Файл подключён — номера строк работают</div>';
+      } else if (fileStatus === 'unsupported') {
+        fileBlock = '<div class="panel__warn">Номера строк недоступны в этом браузере. Открой сайт в Chrome/Edge — там можно подключить файл без сервера.</div>';
+      } else {
+        fileBlock =
+          '<div class="panel__warn">Сайт открыт как file:// — для номеров строк подключи исходный HTML-файл (без сервера, один раз).</div>' +
+          '<button class="btn btn--primary panel__connect" data-act="connect">📄 Подключить файл</button>';
+      }
+    }
     panel.innerHTML =
       '<div class="panel__title">Инспектор <span class="panel__hint">⌘B</span></div>' +
-      fileWarning +
+      fileBlock +
       '<div class="panel__count">0 правок на этой странице</div>' +
       '<div class="panel__row">' +
         '<button class="btn" data-act="copy">Скопировать всё</button>' +
@@ -411,6 +531,8 @@
       '</div>';
     panel.querySelector('[data-act="copy"]').onclick = copyAll;
     panel.querySelector('[data-act="clear"]').onclick = clearAll;
+    var connectBtn = panel.querySelector('[data-act="connect"]');
+    if (connectBtn) connectBtn.onclick = connectFile;
   }
 
   function refreshCounter() {
@@ -495,6 +617,9 @@
     '.panel__hint{font:11px ui-monospace,SFMono-Regular,Menlo,monospace;opacity:.5}' +
     '.panel__warn{font-size:10.5px;line-height:1.4;color:#ffcf7a;background:rgba(255,207,122,.1);' +
       'border:1px solid rgba(255,207,122,.3);border-radius:8px;padding:6px 8px;margin-top:8px}' +
+    '.panel__ok{font-size:10.5px;line-height:1.4;color:#c9f24d;background:rgba(201,242,77,.1);' +
+      'border:1px solid rgba(201,242,77,.3);border-radius:8px;padding:6px 8px;margin-top:8px}' +
+    '.panel__connect{width:100%;margin-top:8px}' +
     '.panel__count{font-size:11px;opacity:.7;margin:8px 0 10px}' +
     '.panel__row{display:flex;gap:8px}' +
     '.panel .btn{flex:1}';
