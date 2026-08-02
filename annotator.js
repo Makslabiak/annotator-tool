@@ -297,6 +297,8 @@
     document.body.appendChild(markersLayer);
 
     buildPanel();
+    applyPanelPosition();
+    initDrag(panel);
     renderMarkers();
     loadPageSource();
     document.addEventListener('keydown', onKeydown, true);
@@ -308,6 +310,82 @@
     var d = document.createElement('div');
     d.className = cls;
     return d;
+  }
+
+  // ---------- перетаскивание панели ----------
+  // Тянешь за заголовок — позиция запоминается в localStorage (свой
+  // домен) и применяется при следующих открытиях. Двойной клик по
+  // заголовку — сброс в угол по умолчанию.
+  var PANEL_POS_KEY = 'annotator:panelPos';
+
+  function applyPanelPosition() {
+    var pos;
+    try { pos = JSON.parse(localStorage.getItem(PANEL_POS_KEY)); } catch (e) {}
+    if (!pos) return;
+    panel.style.left = pos.left + 'px';
+    panel.style.top = pos.top + 'px';
+    panel.style.right = 'auto';
+    panel.style.bottom = 'auto';
+  }
+
+  function resetPanelPosition() {
+    try { localStorage.removeItem(PANEL_POS_KEY); } catch (e) {}
+    panel.style.left = '';
+    panel.style.top = '';
+    panel.style.right = '20px';
+    panel.style.bottom = '20px';
+  }
+
+  // Слушатели вешаем на сам .panel (он не пересоздаётся, в отличие от
+  // .panel__title, которая переотрисовывается при каждом buildPanel()) —
+  // делегирование, чтобы не переинициализировать драг после каждого
+  // обновления содержимого панели.
+  function initDrag(panelEl) {
+    var dragging = false, startX, startY, startLeft, startTop, moved;
+
+    panelEl.addEventListener('mousedown', function (e) {
+      if (!e.target.closest || !e.target.closest('.panel__title')) return;
+      if (e.target.closest('.panel__hint')) return;
+      dragging = true;
+      moved = false;
+      var r = panel.getBoundingClientRect();
+      startLeft = r.left;
+      startTop = r.top;
+      startX = e.clientX;
+      startY = e.clientY;
+      panel.style.left = startLeft + 'px';
+      panel.style.top = startTop + 'px';
+      panel.style.right = 'auto';
+      panel.style.bottom = 'auto';
+      panel.classList.add('is-dragging');
+      e.preventDefault();
+    });
+
+    document.addEventListener('mousemove', function (e) {
+      if (!dragging) return;
+      moved = true;
+      var dx = e.clientX - startX, dy = e.clientY - startY;
+      var newLeft = Math.max(4, Math.min(window.innerWidth - panel.offsetWidth - 4, startLeft + dx));
+      var newTop = Math.max(4, Math.min(window.innerHeight - panel.offsetHeight - 4, startTop + dy));
+      panel.style.left = newLeft + 'px';
+      panel.style.top = newTop + 'px';
+    });
+
+    document.addEventListener('mouseup', function () {
+      if (!dragging) return;
+      dragging = false;
+      panel.classList.remove('is-dragging');
+      if (moved) {
+        var r = panel.getBoundingClientRect();
+        try { localStorage.setItem(PANEL_POS_KEY, JSON.stringify({ left: r.left, top: r.top })); } catch (e) {}
+      }
+    });
+
+    panelEl.addEventListener('dblclick', function (e) {
+      if (!e.target.closest || !e.target.closest('.panel__title')) return;
+      if (e.target.closest('.panel__hint')) return;
+      resetPanelPosition();
+    });
   }
 
   function throttle(fn, ms) {
@@ -613,7 +691,9 @@
     '.btn--ghost{background:transparent;border:1px solid #333}' +
     '.panel{position:fixed;right:20px;bottom:20px;width:210px;background:#181818;color:#fff;' +
       'border-radius:14px;padding:14px;box-shadow:0 12px 40px rgba(0,0,0,.5);pointer-events:auto;z-index:3}' +
-    '.panel__title{font-size:13px;font-weight:700;display:flex;justify-content:space-between;align-items:center}' +
+    '.panel.is-dragging{opacity:.85;box-shadow:0 16px 50px rgba(0,0,0,.6)}' +
+    '.panel__title{font-size:13px;font-weight:700;display:flex;justify-content:space-between;align-items:center;' +
+      'cursor:move;user-select:none;margin:-2px -2px 0;padding:2px}' +
     '.panel__hint{font:11px ui-monospace,SFMono-Regular,Menlo,monospace;opacity:.5}' +
     '.panel__warn{font-size:10.5px;line-height:1.4;color:#ffcf7a;background:rgba(255,207,122,.1);' +
       'border:1px solid rgba(255,207,122,.3);border-radius:8px;padding:6px 8px;margin-top:8px}' +
